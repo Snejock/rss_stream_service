@@ -1,0 +1,24 @@
+name: octobus
+
+services:
+  rss-stream-service:
+    build:
+      context: ..                         # контекст — корень проекта (на уровень выше)
+      dockerfile: compose/Dockerfile
+    container_name: rss-stream-service
+    restart: unless-stopped
+    networks:
+      - dwh-net
+    dns:
+      - 192.168.1.10
+    volumes:
+      - ../config/config.yml:/app/config/config.yml:ro
+      - ../log:/app/log
+    environment:
+      - PYTHONUNBUFFERED=1
+    init: true
+    command: ["python", "rss_stream_service.py"]
+
+networks:
+  dwh-net:
+    external: true
