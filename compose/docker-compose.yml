@@ -15,6 +15,7 @@ services:
       - ../config/config.yml:/app/config/config.yml:ro
       - ../log:/app/log
     environment:
+      - TZ=Europe/Moscow
       - PYTHONUNBUFFERED=1
     init: true
     command: ["python", "rss_stream_service.py"]
