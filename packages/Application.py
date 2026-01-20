@@ -35,10 +35,7 @@ class Application:
                 try:
                     data = await self.rss_provider.fetch(source.url)
                     entries = self.parser.parse(data)
-
-                    payload = []
                     max_cursor = source.cursor
-                    loaded_dttm = datetime.now(self.tz_utc)
 
                     for entry in entries:
                         try:
@@ -48,43 +45,18 @@ class Application:
                             continue
 
                         if published_dttm > source.cursor:
-                            if published_dttm > max_cursor:
-                                max_cursor = published_dttm
-
                             entry["source_system"] = "RSS"
                             entry["feed"] = source.name
-                            entry["published"] = published_dttm.strftime('%Y-%m-%d %H:%M:%S')  # В UTC
+                            entry["published"] = published_dttm.strftime('%Y-%m-%d %H:%M:%S')  # в UTC
 
                             # Отправка в брокер
                             self.br_provider.produce(entry, topic=self.config.broker.topic)
 
-                            payload.append([
-                                loaded_dttm,
-                                entry["source_system"],
-                                source.name,
-                                entry["guid"],
-                                published_dttm,
-                                entry["title"],
-                                entry["summary"],
-                                entry["link"]
-                            ])
+                            if published_dttm > max_cursor:
+                                max_cursor = published_dttm
 
-                    # Вставка данных в clickhouse
-                    if payload:
-                        logger.info(f"Source {source.name}: inserting {len(payload)} new entries. New cursor: {max_cursor}")
-                        await self.ch_provider.async_insert(
-                            table="stg.rss_news",
-                            columns=[
-                                "loaded_dttm", "source_system", "feed_nm", "guid",
-                                "published_dttm", "title_txt", "summary_txt", "link"
-                            ],
-                            data=payload
-                        )
-
-                        # Обновляем курсор только после успешной вставки
-                        source.cursor = max_cursor
-                    else:
-                        logger.debug(f"Source {source.name}: no new entries found")
+                    # Курсор обновляется только после обработки всего батча
+                    source.cursor = max_cursor
 
                 except Exception as e:
                     logger.error(f"Error in processing for {source.name}: {e}", exc_info=True)
@@ -130,23 +102,54 @@ class Application:
         try:
             await self.ch_provider.query("CREATE DATABASE IF NOT EXISTS stg")
 
+            await self.ch_provider.query(f"""
+                CREATE TABLE IF NOT EXISTS stg.queue_rss_news
+                (
+                    source_system String,
+                    feed          String,
+                    guid          String,
+                    published     String,
+                    title         String,
+                    summary       Nullable(String),
+                    link          Nullable(String)
+                )
+                ENGINE = Kafka
+                SETTINGS kafka_broker_list = '{self.config.broker.host}:{self.config.broker.port}',
+                         kafka_topic_list = '{self.config.broker.topic}',
+                         kafka_group_name = 'ch_rss_news_consumer',
+                         kafka_format = 'AvroConfluent',
+                         format_avro_schema_registry_url = '{self.config.broker.schema_registry_url}'
+            """)
+
             await self.ch_provider.query("""
                 CREATE TABLE IF NOT EXISTS stg.rss_news
                 (
-                    loaded_dttm         DateTime,
-                    source_system       LowCardinality(String),
-                    feed_nm             LowCardinality(String),
-                    guid                String,
-                    published_dttm      DateTime,
-                    title_txt           String,
-                    summary_txt         String,
-                    link                String
+                    loaded_dttm     DateTime DEFAULT now(),
+                    source_system   LowCardinality(String),
+                    feed_nm         LowCardinality(String),
+                    guid            String,
+                    published_dttm  DateTime,
+                    title_txt       String,
+                    summary_txt     String,
+                    link            String
                 )
                 ENGINE = ReplacingMergeTree
-                PARTITION BY toYYYYMM(published_dttm)
-                ORDER BY (feed_nm, published_dttm, guid)
-                SETTINGS index_granularity = 8192
+                ORDER BY (published_dttm, feed_nm, guid);                    
             """)
+
+            await self.ch_provider.query("""
+                CREATE MATERIALIZED VIEW IF NOT EXISTS stg.mv_rss_news TO stg.rss_news AS
+                SELECT
+                    source_system           AS source_system,
+                    feed                    AS feed_nm,
+                    guid,
+                    toDateTime(published)   AS published_dttm,
+                    title                   AS title_txt,
+                    coalesce(summary, '')   AS summary_txt,
+                    coalesce(link, '')      AS link
+                FROM stg.queue_rss_news;
+            """)
+
             logger.info("ClickHouse schema ensured (database/table present)")
         except Exception:
             logger.exception("Failed to initialize ClickHouse schema")
