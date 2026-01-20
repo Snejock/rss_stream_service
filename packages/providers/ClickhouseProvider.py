@@ -64,7 +64,7 @@ class ClickhouseProvider:
         """
         Выполнить запрос и вернуть строки результата.
         :param sql: SQL запрос
-        :param params: параметры запроса (placeholders: %(name)s)
+        :param params: параметры запроса (placeholders: {name:Type})
         :return: list[list|tuple]
         """
         if self._client is None:

@@ -9,6 +9,17 @@ class ClickhouseConfig(BaseModel):
     password: str
     secure: bool
 
+class BrokerConfig(BaseModel):
+    host: str
+    port: int
+    client_id: str
+    schema_registry_url: str
+    topic: str
+    linger_ms: int
+    batch_size: int
+    compression_type: str
+    acks: int
+
 class RssSourceConfig(BaseModel):
     name: str
     url: str
@@ -18,4 +29,5 @@ class RssSourceConfig(BaseModel):
 
 class AppConfig(BaseModel):
     clickhouse: ClickhouseConfig
+    broker: BrokerConfig
     rss_sources: List[RssSourceConfig]

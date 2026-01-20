@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from config.schema import AppConfig, RssSourceConfig
-from packages.providers import RssProvider, ClickhouseProvider
+from packages.providers import RssProvider, ClickhouseProvider, BrokerProvider
 from packages.parser import Parser
 
 logger = logging.getLogger(__name__)
@@ -20,11 +20,12 @@ class Application:
         logger.debug("Initializing providers...")
         self.ch_provider = ClickhouseProvider(config=self.config)
         self.rss_provider = RssProvider(timeout_sec=10)
+        self.br_provider = BrokerProvider(config=self.config)
         self.parser = Parser()
 
         logger.info("All components have been successfully initialized")
 
-    async def main_process(self, source: RssSourceConfig):
+    async def main_process(self, source: RssSourceConfig) -> None:
         logger.info(f"Starting worker for source: {source.name}")
         if source.cursor is None:
             await self._get_cursor(source)
@@ -33,13 +34,13 @@ class Application:
             while True:
                 try:
                     data = await self.rss_provider.fetch(source.url)
-                    raw_entries = self.parser.parse(data)
+                    entries = self.parser.parse(data)
 
                     payload = []
                     max_cursor = source.cursor
                     loaded_dttm = datetime.now(self.tz_utc)
 
-                    for entry in raw_entries:
+                    for entry in entries:
                         try:
                             published_dttm = datetime.strptime(entry["published"], '%a, %d %b %Y %H:%M:%S %z').astimezone(timezone.utc)
                         except (ValueError, TypeError):
@@ -50,9 +51,16 @@ class Application:
                             if published_dttm > max_cursor:
                                 max_cursor = published_dttm
 
+                            entry["source_system"] = "RSS"
+                            entry["feed"] = source.name
+                            entry["published"] = published_dttm.strftime('%Y-%m-%d %H:%M:%S')  # В UTC
+
+                            # Отправка в брокер
+                            self.br_provider.produce(entry, topic=self.config.broker.topic)
+
                             payload.append([
                                 loaded_dttm,
-                                "RSS",
+                                entry["source_system"],
                                 source.name,
                                 entry["guid"],
                                 published_dttm,
@@ -61,7 +69,7 @@ class Application:
                                 entry["link"]
                             ])
 
-                    # Вставка данных
+                    # Вставка данных в clickhouse
                     if payload:
                         logger.info(f"Source {source.name}: inserting {len(payload)} new entries. New cursor: {max_cursor}")
                         await self.ch_provider.async_insert(
@@ -91,7 +99,8 @@ class Application:
         try:
             await asyncio.gather(
                 self.ch_provider.connect(),
-                self.rss_provider.connect()
+                self.rss_provider.connect(),
+                self.br_provider.connect(),
             )
             await self._init_db()
 
@@ -105,6 +114,7 @@ class Application:
             logger.info("Cleaning up resources...")
             await self.rss_provider.close()
             await self.ch_provider.close()
+            await self.br_provider.close()
             logger.info("Providers have been successfully closed")
 
     @staticmethod
@@ -147,13 +157,20 @@ class Application:
 
         while True:
             try:
-                result = await self.ch_provider.query(sql=f"SELECT max(published_dttm) FROM stg.rss_news WHERE feed_nm = '{source.name}'")
+                result = await self.ch_provider.query(
+                    """
+                        SELECT max(published_dttm)
+                        FROM stg.rss_news
+                        WHERE feed_nm = {feed:String}
+                    """,
+                    {"feed": source.name}
+                )
 
-                if result and result[0] and result[0][0] is not None:
+                if result and result[0][0] is not None:
                     source.cursor = result[0][0].replace(tzinfo=timezone.utc)
                 else:
-                    logger.warning("Table is empty or NULL returned, setting cursor to 0")
-                    source.cursor = 0
+                    logger.warning("Table is empty or NULL returned, setting cursor to min datetime")
+                    source.cursor = datetime.min.replace(tzinfo=timezone.utc)
 
                 logger.info(f"Cursor initialized for {source.name}: {source.cursor}")
                 return
