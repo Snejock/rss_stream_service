@@ -19,6 +19,11 @@ services:
       - PYTHONUNBUFFERED=1
     init: true
     command: ["python", "rss_stream_service.py"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   dwh-net:
